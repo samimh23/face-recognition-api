@@ -18,9 +18,12 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy requirements and build Python packages
+# Copy requirements and install with specific numpy version first
 COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+
+# Install numpy first, then other packages
+RUN pip install --no-cache-dir --user "numpy>=2.0,<3.0" && \
+    pip install --no-cache-dir --user -r requirements.txt
 
 # Runtime stage - minimal image
 FROM python:3.12-slim
@@ -45,6 +48,10 @@ COPY . .
 
 # Make sure scripts in .local are usable
 ENV PATH=/root/.local/bin:$PATH
+
+# Set environment variables for better compatibility
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
 # Expose port
 EXPOSE 8000
