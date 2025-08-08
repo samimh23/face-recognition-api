@@ -1,4 +1,4 @@
-# Build stage - includes all build tools
+# Build stage
 FROM python:3.12-slim as builder
 
 # Install build dependencies
@@ -13,22 +13,19 @@ RUN apt-get update && apt-get install -y \
     libxrender-dev \
     libgomp1 \
     libgl1-mesa-dev \
-    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-# Copy requirements and install with specific numpy version first
 COPY requirements.txt .
 
-# Install numpy first, then other packages
+# Install Python packages
 RUN pip install --no-cache-dir --user "numpy>=2.0,<3.0" && \
     pip install --no-cache-dir --user -r requirements.txt
 
-# Runtime stage - minimal image
+# Runtime stage - optimized for memory
 FROM python:3.12-slim
 
-# Install only runtime dependencies
+# Install only essential runtime dependencies
 RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     libsm6 \
@@ -36,25 +33,35 @@ RUN apt-get update && apt-get install -y \
     libxrender1 \
     libgomp1 \
     libgl1-mesa-glx \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
 WORKDIR /app
 
-# Copy Python packages from builder stage
+# Copy Python packages from builder
 COPY --from=builder /root/.local /root/.local
 
-# Copy application code
+# Copy optimized application
+COPY main3_optimized.py main3.py
 COPY . .
 
-# Make sure scripts in .local are usable
+# Environment variables for optimization
 ENV PATH=/root/.local/bin:$PATH
-
-# Set environment variables for better compatibility
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONPATH=/app
+ENV PORT=10000
 
-# Expose port
-EXPOSE 8000
+# Memory optimization
+ENV OMP_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+ENV NUMEXPR_NUM_THREADS=1
 
-# Run the application
-CMD ["uvicorn", "main3:api", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE $PORT
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:$PORT/health || exit 1
+
+# Use optimized startup
+CMD uvicorn main3:api --host 0.0.0.0 --port $PORT --workers 1 --access-log
