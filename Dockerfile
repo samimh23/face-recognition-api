@@ -42,7 +42,7 @@ WORKDIR /app
 COPY --from=builder /root/.local /root/.local
 
 # Copy optimized application
-COPY main3_optimized.py main3.py
+COPY main3.py main3.py
 COPY . .
 
 # Environment variables for optimization
