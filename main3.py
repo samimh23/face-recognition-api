@@ -1,84 +1,86 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
-from insightface.app import FaceAnalysis
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
 import cv2
 import numpy as np
-from pymongo import MongoClient
+import io
+from PIL import Image
+import gc
 import os
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+api = FastAPI(title="Face Detection API")
 
-# Initialize MongoDB client - Now fully from environment
-MONGO_URI = os.getenv("MONGO_URI")
-if not MONGO_URI:
-    raise ValueError("MONGO_URI environment variable is required")
-
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client["face_attendance"]
-users_collection = db["users"]
-
-# Use only CPU provider for deployment compatibility
-app_insight = FaceAnalysis(providers=['CPUExecutionProvider'])
-app_insight.prepare(ctx_id=0, det_size=(640, 640))
-
-api = FastAPI(title="Face Recognition API", version="1.0.0")
+# Global variable to store model (lazy loading)
+face_app = None
 
 
-def cosine_similarity(a, b):
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+def get_face_app():
+    """Lazy load the face analysis model to save memory"""
+    global face_app
+    if face_app is None:
+        from insightface.app import FaceAnalysis
+        face_app = FaceAnalysis(providers=['CPUExecutionProvider'])
+        face_app.prepare(ctx_id=0, det_size=(640, 640))
+    return face_app
 
 
 @api.get("/")
 async def root():
-    return {"message": "Face Recognition API is running", "status": "healthy"}
+    return {"message": "Face Detection API is running", "status": "healthy"}
 
 
-@api.post("/register/")
-async def register_face(worker_id: str = Form(...), file: UploadFile = File(...)):
-    img_bytes = await file.read()
-    img_array = np.frombuffer(img_bytes, np.uint8)
-    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-    faces = app_insight.get(img)
-    if not faces:
-        raise HTTPException(status_code=400, detail="No face detected.")
-    emb = faces[0].embedding
-    # Save embedding to MongoDB
-    users_collection.update_one(
-        {"workerCode": worker_id},
-        {"$set": {"faceEmbedding": emb.tolist(), "faceRegistered": True}},
-        upsert=True
-    )
-    return {"message": f"Face registered for {worker_id}", "worker_id": worker_id}
+@api.get("/health")
+async def health_check():
+    return {"status": "healthy", "memory_optimized": True}
 
 
-@api.post("/recognize/")
-async def recognize_face(file: UploadFile = File(...)):
-    img_bytes = await file.read()
-    img_array = np.frombuffer(img_bytes, np.uint8)
-    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-    faces = app_insight.get(img)
-    if not faces:
-        raise HTTPException(status_code=400, detail="No face detected.")
-    emb = faces[0].embedding
+@api.post("/detect_faces")
+async def detect_faces(file: UploadFile = File(...)):
+    try:
+        # Read image
+        contents = await file.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # Compare against all embeddings in MongoDB
-    best_score = 0
-    best_worker = None
-    for user in users_collection.find({"faceRegistered": True, "faceEmbedding": {"$exists": True, "$ne": []}}):
-        db_emb = np.array(user["faceEmbedding"])
-        score = cosine_similarity(emb, db_emb)
-        if score > best_score:
-            best_score = score
-            best_worker = user["workerCode"]
+        if img is None:
+            raise HTTPException(status_code=400, detail="Invalid image format")
 
-    if best_worker and best_score > 0.6:
-        return {"worker_id": best_worker, "score": best_score, "recognized": True}
-    else:
-        return {"worker_id": None, "score": best_score, "recognized": False}
+        # Get face analysis model (lazy loaded)
+        app = get_face_app()
+
+        # Detect faces
+        faces = app.get(img)
+
+        # Process results
+        results = []
+        for face in faces:
+            bbox = face.bbox.astype(int)
+            results.append({
+                "bbox": {
+                    "x": int(bbox[0]),
+                    "y": int(bbox[1]),
+                    "width": int(bbox[2] - bbox[0]),
+                    "height": int(bbox[3] - bbox[1])
+                },
+                "confidence": float(face.det_score),
+                "age": int(face.age) if hasattr(face, 'age') else None,
+                "gender": face.sex if hasattr(face, 'sex') else None
+            })
+
+        # Force garbage collection to free memory
+        gc.collect()
+
+        return JSONResponse({
+            "faces_detected": len(results),
+            "faces": results,
+            "image_size": {"width": img.shape[1], "height": img.shape[0]}
+        })
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(api, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(api, host="0.0.0.0", port=port)
